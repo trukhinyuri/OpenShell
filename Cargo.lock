@@ -4835,6 +4835,7 @@ dependencies = [
  "nix 0.29.0",
  "openshell-binary-identity",
  "openshell-core",
+ "openshell-crypto",
  "openshell-isolation-interface",
  "openshell-ocsf",
  "openshell-policy",
