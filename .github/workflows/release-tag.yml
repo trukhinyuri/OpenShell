@@ -132,6 +132,7 @@ jobs:
 
   qualification-result:
     name: Release Qualification
+    if: always() && needs.compute-versions.result == 'success'
     needs: [compute-versions, build-binaries, build-vm-driver, build-images, build-deb, build-rpm]
     permissions:
       actions: read
