@@ -161,12 +161,28 @@ Top-level lists represent TOML arrays of tables and preserve their YAML order. *
 {{- end -}}
 {{- $legacyOtlp := get $legacyServer "otlp" | default dict -}}
 {{- $otlpConfig := get $config "openshell.gateway.otlp" | default dict -}}
-{{- if or (hasKey $config "openshell.gateway.otlp") (get $legacyOtlp "endpoint") -}}
-{{- if get $legacyOtlp "endpoint" -}}
-{{- if not (hasKey $otlpConfig "endpoint") -}}{{- $_ := set $otlpConfig "endpoint" (get $legacyOtlp "endpoint") -}}{{- end -}}
+{{- $legacyTraces := get $legacyOtlp "traces" | default dict -}}
+{{- $legacyOtlpOcsf := get $legacyOtlp "ocsf" | default dict -}}
+{{- $ocsfSchemaVersion := get $legacyOtlpOcsf "schemaVersion" | default "" -}}
+{{- if not (has $ocsfSchemaVersion (list "" "1.1" "1.3")) -}}{{- fail "server.otlp.ocsf.schemaVersion must be empty, 1.1, or 1.3" -}}{{- end -}}
+{{- if and (or $ocsfSchemaVersion (get $legacyOtlpOcsf "endpoint")) (not (get $legacyOtlpOcsf "enabled")) -}}{{- fail "server.otlp.ocsf.endpoint and schemaVersion require server.otlp.ocsf.enabled" -}}{{- end -}}
+{{- if and (get $legacyOtlpOcsf "enabled") (not (get $legacyOtlpOcsf "endpoint")) (not (get $legacyOtlp "endpoint")) (not (get $otlpConfig "endpoint")) -}}{{- fail "server.otlp.ocsf.enabled requires server.otlp.ocsf.endpoint or server.otlp.endpoint" -}}{{- end -}}
+{{- $legacySignals := or (get $legacyOtlp "endpoint") (get $legacyTraces "endpoint") (get $legacyOtlpOcsf "enabled") -}}
+{{- if or (hasKey $config "openshell.gateway.otlp") $legacySignals -}}
+{{- if $legacySignals -}}
+{{- if and (get $legacyOtlp "endpoint") (not (hasKey $otlpConfig "endpoint")) -}}{{- $_ := set $otlpConfig "endpoint" (get $legacyOtlp "endpoint") -}}{{- end -}}
 {{- if not (hasKey $otlpConfig "service_name") -}}{{- $_ := set $otlpConfig "service_name" (get $legacyOtlp "serviceName") -}}{{- end -}}
 {{- end -}}
 {{- $_ := set $config "openshell.gateway.otlp" $otlpConfig -}}
+{{- if and (get $legacyTraces "endpoint") (not (hasKey $config "openshell.gateway.otlp.traces")) (not (hasKey $otlpConfig "traces")) -}}
+{{- $_ := set $config "openshell.gateway.otlp.traces" (dict "endpoint" (get $legacyTraces "endpoint")) -}}
+{{- end -}}
+{{- if and (get $legacyOtlpOcsf "enabled") (not (hasKey $config "openshell.gateway.otlp.ocsf")) (not (hasKey $otlpConfig "ocsf")) -}}
+{{- $ocsfOtlp := dict -}}
+{{- if get $legacyOtlpOcsf "endpoint" -}}{{- $_ := set $ocsfOtlp "endpoint" (get $legacyOtlpOcsf "endpoint") -}}{{- end -}}
+{{- if $ocsfSchemaVersion -}}{{- $_ := set $ocsfOtlp "schema_version" $ocsfSchemaVersion -}}{{- end -}}
+{{- $_ := set $config "openshell.gateway.otlp.ocsf" $ocsfOtlp -}}
+{{- end -}}
 {{- end -}}
 {{- $legacyAuth := get $legacyServer "auth" | default dict -}}
 {{- if and (get $legacyAuth "allowUnauthenticatedUsers") (not (hasKey $config "openshell.gateway.auth")) -}}{{- $_ := set $config "openshell.gateway.auth" (dict "allow_unauthenticated_users" true) -}}{{- end -}}

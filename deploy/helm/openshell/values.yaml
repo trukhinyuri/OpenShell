@@ -315,12 +315,26 @@ server:
   name: ""
   # -- Gateway log level.
   logLevel: info
-  # OpenTelemetry trace export over OTLP/gRPC. Leave endpoint empty to disable.
+  # OpenTelemetry export over OTLP/gRPC. Leave the endpoints empty and OCSF
+  # export disabled to export nothing.
   otlp:
-    # -- OTLP/gRPC collector endpoint, conventionally using port 4317.
+    # -- OTLP/gRPC collector endpoint for every enabled signal, conventionally
+    # using port 4317. Setting it enables trace export.
     endpoint: ""
     # -- Gateway OpenTelemetry service name. Empty uses openshell-gateway.
     serviceName: ""
+    traces:
+      # -- Trace collector endpoint. Overrides server.otlp.endpoint for traces
+      # and enables trace export on its own.
+      endpoint: ""
+    ocsf:
+      # -- Export gateway OCSF events as OTLP log records.
+      enabled: false
+      # -- OCSF collector endpoint. Empty uses server.otlp.endpoint.
+      endpoint: ""
+      # -- Optional OCSF downgrade target for exported log records. Empty
+      # exports native OCSF 1.8.0. Supported values: "1.1", "1.3".
+      schemaVersion: ""
   # Gateway-native OCSF JSONL output.
   ocsfLog:
     # -- Write gateway OCSF events as JSONL.
