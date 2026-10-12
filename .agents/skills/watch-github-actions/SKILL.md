@@ -178,9 +178,11 @@ candidate and baseline SHAs before interpreting findings. `complete` describes
 execution and coverage, not compatibility: also read the assessment and findings.
 An `error`, incomplete coverage, or missing artifact means no clean review is
 available. Its findings are advisory and do not affect the qualification result.
-The review starts after Security Scan finishes, and the two Codex workflows share
-the `codex-release-review` concurrency group to prevent overlapping API usage
-across runs. The qualification caller waits for both reviews to finish. Do not
+The review is scheduled independently of Security Scan. The two Codex workflows
+share the `codex-release-review` concurrency group with `queue: max`, retaining
+up to 100 pending reviews while preventing overlapping API usage across runs.
+Either review can run first; other security scanners run in parallel.
+The qualification caller waits for both reviews to finish. Do not
 rerun Release Tag to debug this reviewer. Use its dedicated manual workflow
 with an existing candidate tag; that path does not publish release artifacts.
 
