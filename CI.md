@@ -75,10 +75,12 @@ so Windows failures do not fail the workflow.
 
 ### Advisory release compatibility review
 
-`Codex Compatibility Review` runs after Security Scan in the reusable release
-qualification workflow. Both Codex workflows share the `codex-release-review`
-concurrency group, so separate release or manual runs cannot overlap their API
-usage. The review covers the cumulative diff from the previous reachable stable release to the
+`Codex Compatibility Review` is scheduled independently of Security Scan in the
+reusable release qualification workflow. Both Codex workflows share the
+`codex-release-review` concurrency group with `queue: max`, so only one review
+runs at a time and up to 100 pending reviews are retained across release and
+manual runs. Either review can run first; other security scanners run in parallel.
+The review covers the cumulative diff from the previous reachable stable release to the
 exact candidate commit, using the same tag-derived patch/minor policy as the
 protobuf check. It reviews public Rust, Python, Go, and TypeScript SDKs, API
 behavior, CLI contracts, configuration, policy, Helm, and persisted state.
