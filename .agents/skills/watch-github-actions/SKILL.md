@@ -163,7 +163,9 @@ During `0.x`, a minor train permits compatibility findings
 as warnings; a patch train or no active train rejects them. Compare the current
 train's version with the latest stable release; commit messages are irrelevant.
 Compilation, baseline, and tool errors remain fatal. The `protobuf_compatibility` suite participates in
-the `release-tag-v1` qualification profile. Both tagged pre-release and stable
+the `release-tag-v1` qualification profile. Release Tag calls the reusable
+`release-qualification.yml` workflow to run the checks and collect their results.
+Both tagged pre-release and stable
 publication require this profile to pass. Failed, cancelled, or skipped suites
 block publication; build artifacts and qualification evidence remain in Actions
 storage for diagnosis. Source-SHA images are staging inputs for qualification.
@@ -175,8 +177,10 @@ For `Codex Compatibility Review`, inspect its job summary and the
 candidate and baseline SHAs before interpreting findings. `complete` describes
 execution and coverage, not compatibility: also read the assessment and findings.
 An `error`, incomplete coverage, or missing artifact means no clean review is
-available. The job is advisory and independent of publication gates; the
-qualification summary points to it without waiting for completion. Do not
+available. Its findings are advisory and do not affect the qualification result.
+The review starts after Security Scan finishes, and the two Codex workflows share
+the `codex-release-review` concurrency group to prevent overlapping API usage
+across runs. The qualification caller waits for both reviews to finish. Do not
 rerun Release Tag to debug this reviewer. Use its dedicated manual workflow
 with an existing candidate tag; that path does not publish release artifacts.
 
