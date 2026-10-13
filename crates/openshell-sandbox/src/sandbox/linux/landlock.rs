@@ -342,7 +342,16 @@ fn prepare_with_path_open_mode(
         let ruleset = ruleset.create().into_diagnostic()?;
         let (mut ruleset, mut rules_applied) = cdi_paths.process_validated(
             (ruleset, 0_usize),
-            |path| PathFd::new(path).into_diagnostic(),
+            // Use a direct O_PATH open for CDI objects. PathFd uses std
+            // OpenOptions, whose musl opener cannot open Unix socket inodes.
+            |path| {
+                rustix::fs::open(
+                    path,
+                    rustix::fs::OFlags::PATH | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )
+                .into_diagnostic()
+            },
             |(ruleset, count), path, fd| {
                 // A covered CDI target still needs validation, but no extra
                 // rule. Match exact policy entries without reopening the path.
