@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Endpoint settings for policy-template.cedar, passed with --middleware when
+# POLICY_FORMAT=cedar. They are the `mcp` options of the YAML endpoint, which
+# configure inspection rather than grant access. render-policy.py substitutes
+# the placeholders.
+
+endpoint_settings:
+  - host: ${host_json}
+    port: ${port}
+    mcp:
+      versions: [${mcp_version}]
+      max_body_bytes: 131072

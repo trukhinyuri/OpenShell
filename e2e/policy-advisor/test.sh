@@ -7,7 +7,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-POLICY_TEMPLATE="${SCRIPT_DIR}/policy.template.yaml"
+# POLICY_FORMAT=cedar starts the sandbox from policy.template.cedar instead
+# of policy.template.yaml. A Cedar policy accepts no merged rules, so the test
+# then checks that the gateway rejects the proposal instead of approving it.
+POLICY_FORMAT="${POLICY_FORMAT:-yaml}"
+case "$POLICY_FORMAT" in
+    yaml | cedar) ;;
+    *)
+        printf 'POLICY_FORMAT must be yaml or cedar\n' >&2
+        exit 2
+        ;;
+esac
+POLICY_TEMPLATE="${SCRIPT_DIR}/policy.template.${POLICY_FORMAT}"
 RUNNER_SOURCE="${SCRIPT_DIR}/sandbox-runner.sh"
 
 if [[ -z "${OPENSHELL_BIN:-}" ]]; then
@@ -216,7 +227,7 @@ Enable it with:
 
 create_temp_workspace() {
     TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/openshell-agent-policy.XXXXXX")"
-    POLICY_FILE="${TMP_DIR}/policy.yaml"
+    POLICY_FILE="${TMP_DIR}/policy.${POLICY_FORMAT}"
     SSH_CONFIG="${TMP_DIR}/ssh_config"
 }
 
@@ -328,6 +339,14 @@ submit_and_approve() {
     body="$(printf '%s\n' "$output" | http_body)"
 
     [[ "$status" == "202" ]] || fail "expected proposal submit HTTP 202, got HTTP $status"
+    if [[ "$POLICY_FORMAT" == "cedar" ]]; then
+        printf '%s\n' "$body" \
+            | jq -e '(.accepted_chunks // 0) == 0
+                and any(.rejection_reasons[]; contains("exactly one policy format"))' >/dev/null \
+            || fail "expected the gateway to reject a proposal for a Cedar sandbox: $body"
+        info "${GREEN}Gateway rejected the proposal: a Cedar policy accepts no merged rules.${RESET}"
+        return
+    fi
     [[ "$(printf '%s\n' "$body" | jq -r '.accepted_chunks // 0')" != "0" ]] \
         || fail "proposal was not accepted"
     printf '%s\n' "$body" | jq -r '"Proposal submitted: \(.accepted_chunks) accepted, \(.rejected_chunks) rejected"' | sed 's/^/  /'
@@ -397,7 +416,9 @@ main() {
     run_policy_local_checks
     capture_initial_denial
     submit_and_approve
-    retry_until_allowed
+    if [[ "$POLICY_FORMAT" == "yaml" ]]; then
+        retry_until_allowed
+    fi
     show_logs
 
     printf "\n${BOLD}${GREEN}✓ Validation complete.${RESET}\n\n"

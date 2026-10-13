@@ -15,7 +15,7 @@ use openshell_core::proto::{
 };
 use openshell_core::provider_credentials::ProviderCredentialState;
 use openshell_isolation_interface::contract::{BoundaryExec, ProviderEnvironmentInstallation};
-use openshell_supervisor_network::opa::PolicyGenerationGuard;
+use openshell_supervisor_network::policy_types::PolicyGenerationGuard;
 use tokio::sync::watch;
 
 /// Authority captured before consuming a provider response's credential fields.
