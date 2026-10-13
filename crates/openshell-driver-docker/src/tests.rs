@@ -49,6 +49,9 @@ fn startup_error_log_tails_fit_grpc_header_budget() {
     assert!(format_log_tail("").is_empty());
 }
 
+const TEST_CDI_SPEC_DIR: &str = "/opt/openshell-test/cdi";
+const TEST_CDI_SPEC_DIR_ALT: &str = "/srv/openshell-test/cdi";
+
 fn test_launch_authentication() -> Vec<u8> {
     serde_json::to_vec(&SandboxLaunchAuthentication {
         supervisor: SupervisorAuthBundle {
@@ -103,6 +106,69 @@ fn test_sandbox() -> DriverSandbox {
         }),
         status: None,
         workspace: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn admission_accepts_only_exact_read_only_cdi_spec_projections() {
+    let mut config = runtime_config_with_cdi_spec_dirs(&[TEST_CDI_SPEC_DIR]);
+    config.resource_admission =
+        openshell_core::resource_admission::ResourceAdmissionConfig::default();
+    let driver = test_driver_with_config(config);
+    let value = serde_json::json!({
+        "Config": {"Labels": {
+            LABEL_SANDBOX_WORKSPACE: "team-a",
+            LABEL_SANDBOX_ID: "cdi-admission",
+            openshell_core::resource_admission::CONFIG_USED_LABEL: "false",
+            openshell_core::resource_admission::IDENTITIES_LABEL: "{}"
+        }},
+        "HostConfig": {"DeviceRequests": [{"Driver": "cdi", "DeviceIDs": ["nvidia.com/gpu=0"]}]},
+        "Mounts": [{"Type": "bind", "Source": TEST_CDI_SPEC_DIR,
+            "Destination": cdi_spec_mount_path(0), "RW": false, "Propagation": "rprivate"}]
+    });
+    let inspect = serde_json::from_value(value.clone()).unwrap();
+    driver.admit_container_resources(&inspect).await.unwrap();
+    for (field, replacement) in [
+        ("Source", serde_json::json!("/untrusted")),
+        ("Destination", serde_json::json!("/elsewhere")),
+        ("RW", serde_json::json!(true)),
+        ("Type", serde_json::json!("volume")),
+        ("Propagation", serde_json::json!("rshared")),
+    ] {
+        let mut changed = value.clone();
+        changed["Mounts"][0][field] = replacement;
+        // Avoid a daemon lookup for the wrong mount type.
+        if field == "Type" {
+            changed["Mounts"][0]["Name"] = serde_json::json!("unexpected");
+        }
+        let inspect = serde_json::from_value(changed).unwrap();
+        assert!(
+            driver.admit_container_resources(&inspect).await.is_err(),
+            "{field}"
+        );
+    }
+    for change in ["missing", "duplicate", "extra", "no-request"] {
+        let mut changed = value.clone();
+        match change {
+            "missing" => changed["Mounts"] = serde_json::json!([]),
+            "duplicate" => changed["Mounts"]
+                .as_array_mut()
+                .unwrap()
+                .push(value["Mounts"][0].clone()),
+            "extra" => changed["Mounts"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "Type": "bind", "Source": "/data", "Destination": "/data", "RW": false
+                })),
+            "no-request" => changed["HostConfig"]["DeviceRequests"] = serde_json::json!([]),
+            _ => unreachable!(),
+        }
+        let inspect = serde_json::from_value(changed).unwrap();
+        assert!(
+            driver.admit_container_resources(&inspect).await.is_err(),
+            "{change}"
+        );
     }
 }
 
@@ -218,6 +284,7 @@ fn runtime_config() -> DockerDriverRuntimeConfig {
         }),
         gpu: DockerGpuRuntimeCapabilities {
             cdi_supported: false,
+            cdi_spec_dirs: Vec::new(),
             wsl_all_gpu_fallback_enabled: false,
         },
         sandbox_pids_limit: openshell_core::config::default_sandbox_pids_limit(),
@@ -389,6 +456,59 @@ fn sandbox_driver_config_cannot_override_proxy_ca_bundle() {
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
     assert!(error.message().contains("unknown field"), "{error}");
     assert!(error.message().contains("proxy_ca_bundle"), "{error}");
+}
+
+fn runtime_config_with_cdi_spec_dirs(cdi_spec_dirs: &[&str]) -> DockerDriverRuntimeConfig {
+    let mut config = runtime_config();
+    config.gpu.cdi_supported = !cdi_spec_dirs.is_empty();
+    config.gpu.cdi_spec_dirs = cdi_spec_dirs
+        .iter()
+        .map(|path| (*path).to_string())
+        .collect();
+    config
+}
+
+#[test]
+fn gpu_runtime_builds_cdi_context_from_selected_devices_and_daemon_dirs() {
+    let config = runtime_config_with_cdi_spec_dirs(&[TEST_CDI_SPEC_DIR, TEST_CDI_SPEC_DIR_ALT]);
+    let selected_devices = vec![
+        "nvidia.com/gpu=0".to_string(),
+        "nvidia.com/gpu=1".to_string(),
+    ];
+
+    let context = config
+        .gpu
+        .cdi_context(Some(&selected_devices))
+        .unwrap()
+        .expect("GPU selection should produce a CDI context");
+
+    assert_eq!(context.selected_devices, selected_devices);
+    assert_eq!(
+        context.spec_dirs,
+        vec![
+            CdiSpecDirectory::new(cdi_spec_mount_path(0), TEST_CDI_SPEC_DIR),
+            CdiSpecDirectory::new(cdi_spec_mount_path(1), TEST_CDI_SPEC_DIR_ALT),
+        ]
+    );
+}
+
+#[test]
+fn gpu_runtime_omits_cdi_projection_without_selected_devices() {
+    let config = runtime_config_with_cdi_spec_dirs(&[TEST_CDI_SPEC_DIR]);
+    assert_eq!(config.gpu.cdi_context(None).unwrap(), None);
+}
+
+#[test]
+fn gpu_runtime_builds_read_only_cdi_bind_mounts() {
+    let config = runtime_config_with_cdi_spec_dirs(&[TEST_CDI_SPEC_DIR, TEST_CDI_SPEC_DIR_ALT]);
+
+    assert_eq!(
+        config.gpu.cdi_spec_bind_strings().unwrap(),
+        vec![
+            format!("{TEST_CDI_SPEC_DIR}:{}:ro,z", cdi_spec_mount_path(0)),
+            format!("{TEST_CDI_SPEC_DIR_ALT}:{}:ro,z", cdi_spec_mount_path(1)),
+        ]
+    );
 }
 
 fn test_workload_identity() -> ResolvedWorkloadIdentity {
@@ -2674,8 +2794,7 @@ fn validate_sandbox_auth_accepts_launch_authentication() {
 
 #[test]
 fn build_container_create_body_maps_default_gpu_to_selected_cdi_device() {
-    let mut config = runtime_config();
-    config.gpu.cdi_supported = true;
+    let config = runtime_config_with_cdi_spec_dirs(&[TEST_CDI_SPEC_DIR]);
     let mut sandbox = test_sandbox();
     sandbox.spec.as_mut().unwrap().resource_requirements = Some(gpu_resources(None));
 
@@ -2700,6 +2819,15 @@ fn build_container_create_body_maps_default_gpu_to_selected_cdi_device() {
         request.device_ids.as_ref().unwrap(),
         &vec!["nvidia.com/gpu=1".to_string()]
     );
+    let binds = create_body
+        .host_config
+        .as_ref()
+        .and_then(|host_config| host_config.binds.as_ref())
+        .expect("GPU request should project CDI specs into the workload");
+    assert!(binds.contains(&format!(
+        "{TEST_CDI_SPEC_DIR}:{}:ro,z",
+        cdi_spec_mount_path(0)
+    )));
 }
 
 #[test]
@@ -2722,8 +2850,7 @@ fn build_container_create_body_omits_devices_without_resolved_default_cdi_device
 
 #[test]
 fn container_spec_accepts_non_nvidia_explicit_and_resolved_cdi_devices() {
-    let mut config = runtime_config();
-    config.gpu.cdi_supported = true;
+    let config = runtime_config_with_cdi_spec_dirs(&[TEST_CDI_SPEC_DIR]);
     let mut sandbox = test_sandbox();
     sandbox.spec.as_mut().unwrap().resource_requirements = Some(gpu_resources(None));
     for device in ["example.com/gpu=0", "intel.com/gpu=0", "amd.com/gpu=0"] {
@@ -2807,8 +2934,7 @@ fn container_spec_rejects_host_paths_in_explicit_and_resolved_cdi_devices() {
 
 #[test]
 fn build_container_create_body_passes_explicit_cdi_device_id_through() {
-    let mut config = runtime_config();
-    config.gpu.cdi_supported = true;
+    let config = runtime_config_with_cdi_spec_dirs(&[TEST_CDI_SPEC_DIR]);
     let mut sandbox = test_sandbox();
     let spec = sandbox.spec.as_mut().unwrap();
     spec.resource_requirements = Some(gpu_resources(None));
@@ -2878,8 +3004,7 @@ fn build_container_create_body_rejects_empty_cdi_devices() {
 
 #[test]
 fn driver_default_gpu_selection_consumes_distinct_devices_for_creates() {
-    let mut config = runtime_config();
-    config.gpu.cdi_supported = true;
+    let config = runtime_config_with_cdi_spec_dirs(&[TEST_CDI_SPEC_DIR]);
     let driver = test_driver_with_config(config);
     driver.gpu_selector.refresh(
         CdiGpuInventory::new(["nvidia.com/gpu=0", "nvidia.com/gpu=1"]),

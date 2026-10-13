@@ -148,6 +148,18 @@ For Docker-backed sandboxes, GPU injection uses Docker CDI. If you enable Docker
 CDI after the gateway starts, restart the gateway so OpenShell can detect the
 updated Docker daemon capability.
 
+For CDI-enabled Docker sandboxes, OpenShell validates the injected filesystem
+targets before each launch and exec. Library directories may use symlinks, but
+must not resolve to broad roots such as `/`, `/usr`, or `/dev`. Device nodes must
+resolve to devices, and writable mounts must resolve to single files explicitly
+allowed by exact entries in the policy. OpenShell determines mount access from
+effective runtime flags, including writable submounts beneath original directory
+mounts. CDI does not automatically grant write access to `/proc`. The container
+runtime must supply any supplemental groups required by the CDI spec; missing
+groups prevent workload launch. CDI spec projections are checked with resource
+admission enabled. Invalid CDI targets or unavailable filesystem enforcement
+stop the launch, including with best-effort Landlock compatibility.
+
 Docker and Podman refresh the CDI inventory before validating or creating a
 default GPU request, so CDI devices added or removed after the driver starts can
 be reflected in later sandbox creates. On WSL2 all-only runtimes, the default
