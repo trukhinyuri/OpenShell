@@ -98,6 +98,14 @@ let
     target = muslToolchain.target;
     output = "artifacts/test-archives/${muslToolchain.target}/provider-refresh-keycloak-tests.tar";
   };
+  cdiArchive = mkTestArchive {
+    name = "openshell-cdi";
+    workspacePath = "tests/suites/features";
+    manifestPath = "tests/suites/features/Cargo.toml";
+    package = "openshell-test-feature-cdi";
+    target = muslToolchain.target;
+    output = "artifacts/test-archives/${muslToolchain.target}/openshell-cdi-tests.tar";
+  };
 
   # Follow-up: migrate these wrapper-coupled tests once tmachine provides their
   # managed-gateway controls, SPIFFE fixtures, caller driver-config setting,
@@ -201,6 +209,7 @@ rec {
   inherit
     conformanceCliArchive
     providerRefreshKeycloakArchive
+    cdiArchive
     podmanDriverArchive
     podmanE2eArchive
     podmanE2eCiTests
@@ -284,12 +293,14 @@ rec {
     runtimeInputs = [
       conformanceCliArchive
       providerRefreshKeycloakArchive
+      cdiArchive
       podmanDriverArchive
       podmanE2eArchive
     ];
     text = ''
       build-openshell-conformance-test-archive
       build-provider-refresh-keycloak-test-archive
+      build-openshell-cdi-test-archive
       build-podman-driver-test-archive
       build-podman-e2e-test-archive
     '';

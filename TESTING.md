@@ -309,6 +309,35 @@ nix run .#tmachine -- test fedora-podman-rootless binaries e2e-podman
 nix run .#tmachine -- test fedora-podman-rootless binaries driver-podman
 ```
 
+The `cdi` feature suite tests device injection without GPU hardware in the
+`ubuntu-docker-rootful` environment. Build the candidate artifacts, then run:
+
+```shell
+nix run .#build-artifacts
+nix run .#tmachine -- test ubuntu-docker-rootful deb cdi
+```
+
+If candidate binaries, images, and packages are already built, rebuild just the
+CDI test archive with `nix run .#build-artifacts-cdi-tests`.
+
+The `binaries` installer also supports this suite. Docker environment setup
+generates two dummy `nvidia.com/gpu` YAML specs, plus an
+unrelated vendor spec. Each fake GPU injects an environment marker and a
+read-only file mount. Persistent spec sources live under
+`/var/lib/openshell-test-inputs/cdi/specs`; a systemd-tmpfiles configuration
+recreates them in `/var/run/cdi` on every VM boot. This preserves the fixtures
+across tmachine's setup, installation, and test disk layers and makes them
+available to every suite using the Docker environment. No device nodes or GPU
+hardware are needed.
+
+Tests cover explicit single and multiple devices, default and count-based
+selection, absence of CDI edits without a GPU request, unknown devices,
+unavailable counts, and device/count mismatches. Caller driver configuration is
+enabled temporarily in the installed gateway's active TOML. The test playbook
+restores the configuration and restarts the gateway even after test failure;
+the CDI fixtures remain part of the environment. Docker must support CDI.
+Branch and release feature-test matrices run this suite on Docker.
+
 Print the exact tmachine archive selection as a shell `PODMAN_CI_TESTS` array:
 
 ```shell

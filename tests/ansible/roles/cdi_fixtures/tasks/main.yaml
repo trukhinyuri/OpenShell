@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+---
+# Persistent sources are copied into /var/run/cdi by systemd-tmpfiles on every
+# boot, including the setup, installation, and test disk layers.
+- name: Check fixture paths before creating dummy CDI specs
+  become: true
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /var/run/cdi/openshell-tmachine-0.yaml
+    - /var/run/cdi/openshell-tmachine-1.yaml
+    - /var/run/cdi/openshell-tmachine-unrelated.yaml
+  register: cdi_fixture_paths
+
+- name: Require a guest without existing fixture paths
+  ansible.builtin.assert:
+    that: [not item.stat.exists]
+    fail_msg: "Refusing to replace existing CDI fixture path {{ item.item }}"
+  loop: "{{ cdi_fixture_paths.results }}"
+
+- name: Create CDI spec and marker directories
+  become: true
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /var/lib/openshell-test-inputs/cdi
+    - /var/lib/openshell-test-inputs/cdi/specs
+
+- name: Write readable device markers
+  become: true
+  ansible.builtin.copy:
+    content: "tmachine-cdi-{{ item }}\n"
+    dest: "/var/lib/openshell-test-inputs/cdi/device-{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [0, 1]
+
+- name: Generate NVIDIA CDI specs
+  become: true
+  ansible.builtin.copy:
+    dest: "/var/lib/openshell-test-inputs/cdi/specs/openshell-tmachine-{{ item }}.yaml"
+    content: |
+      cdiVersion: "0.5.0"
+      kind: nvidia.com/gpu
+      containerEdits:
+        env:
+          - TMACHINE_CDI_SPEC_{{ item }}=fixture
+      devices:
+        - name: "{{ item }}"
+          containerEdits:
+            env:
+              - TMACHINE_CDI_DEVICE_{{ item }}={{ item }}
+            mounts:
+              - hostPath: /var/lib/openshell-test-inputs/cdi/device-{{ item }}
+                containerPath: /usr/share/openshell-cdi/device-{{ item }}
+                options: [bind, ro]
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [0, 1]
+
+- name: Generate an unrelated CDI device to check GPU inventory filtering
+  become: true
+  ansible.builtin.copy:
+    dest: /var/lib/openshell-test-inputs/cdi/specs/openshell-tmachine-unrelated.yaml
+    content: |
+      cdiVersion: "0.5.0"
+      kind: tmachine.example/device
+      devices:
+        - name: "0"
+          containerEdits:
+            env:
+              - TMACHINE_CDI_UNRELATED=fixture
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Recreate volatile CDI specs on every VM boot
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/openshell-tmachine-cdi.conf
+    content: |
+      # Hardware-free CDI fixtures for the disposable Docker test environment.
+      d /run/cdi 0755 root root -
+      C /run/cdi/openshell-tmachine-0.yaml 0644 root root - /var/lib/openshell-test-inputs/cdi/specs/openshell-tmachine-0.yaml
+      C /run/cdi/openshell-tmachine-1.yaml 0644 root root - /var/lib/openshell-test-inputs/cdi/specs/openshell-tmachine-1.yaml
+      C /run/cdi/openshell-tmachine-unrelated.yaml 0644 root root - /var/lib/openshell-test-inputs/cdi/specs/openshell-tmachine-unrelated.yaml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Populate CDI specs for the current boot
+  become: true
+  ansible.builtin.command:
+    argv: [systemd-tmpfiles, --create, /etc/tmpfiles.d/openshell-tmachine-cdi.conf]
+  changed_when: true

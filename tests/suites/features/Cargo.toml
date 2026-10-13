@@ -3,4 +3,4 @@
 
 [workspace]
 resolver = "2"
-members = ["provider-refresh/keycloak"]
+members = ["cdi", "provider-refresh/keycloak"]
