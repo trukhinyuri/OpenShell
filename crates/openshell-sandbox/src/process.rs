@@ -1117,6 +1117,7 @@ mod tests {
         let policy = policy_with_process(ProcessPolicy {
             run_as_user: Some(current_user.name.clone()),
             run_as_group: None,
+            ..Default::default()
         });
         let workspace = ResolvedWorkspace::default();
         let mut cmd = Command::new("/usr/bin/env");
@@ -1179,6 +1180,7 @@ mod tests {
         let policy = policy_with_process(ProcessPolicy {
             run_as_user: Some(current_user.name),
             run_as_group: None,
+            supplemental_groups: Vec::new(),
         });
         // Mirror production: inherit the sandbox environment, no env_clear.
         let mut cmd = Command::new("/usr/bin/env");
@@ -1221,6 +1223,7 @@ mod tests {
         let policy = policy_with_process(ProcessPolicy {
             run_as_user: Some(current_user.name),
             run_as_group: None,
+            ..Default::default()
         });
         for interactive in [false, true] {
             let mut cmd = Command::new("/usr/bin/env");
@@ -1493,6 +1496,7 @@ mod tests {
             read_only: vec![root.clone()],
             read_write: Vec::new(),
             include_workdir: false,
+            cdi_requirements: None,
         };
         policy.landlock = LandlockPolicy {
             compatibility: openshell_core::policy::LandlockCompatibility::HardRequirement,

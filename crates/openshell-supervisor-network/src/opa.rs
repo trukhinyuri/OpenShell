@@ -1404,6 +1404,7 @@ fn parse_filesystem_policy(val: &regorus::Value) -> FilesystemPolicy {
             .map(PathBuf::from)
             .collect(),
         include_workdir: get_bool(val, "include_workdir").unwrap_or(true),
+        cdi_requirements: None,
     }
 }
 
@@ -1422,6 +1423,7 @@ fn parse_process_policy(val: &regorus::Value) -> ProcessPolicy {
     ProcessPolicy {
         run_as_user: get_str(val, "run_as_user"),
         run_as_group: get_str(val, "run_as_group"),
+        ..ProcessPolicy::default()
     }
 }
 

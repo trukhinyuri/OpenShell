@@ -253,11 +253,25 @@ fn prepare_with_path_open_mode(
         }
     }
 
-    if read_only.is_empty() && read_write.is_empty() {
+    // Keep only path requirements; CDI descriptors are opened and consumed
+    // sequentially when building rules, including validation-only targets.
+    let cdi_paths = policy
+        .filesystem
+        .cdi_requirements
+        .as_ref()
+        .map(super::super::cdi_paths::CdiPaths::new)
+        .unwrap_or_default();
+
+    if read_only.is_empty() && read_write.is_empty() && cdi_paths.is_empty() {
         return Ok(None);
     }
 
-    let compatibility = &policy.landlock.compatibility;
+    // CDI safety requirements cannot fall back to an unrestricted launch.
+    let compatibility = if policy.filesystem.cdi_requirements.is_some() {
+        &LandlockCompatibility::HardRequirement
+    } else {
+        &policy.landlock.compatibility
+    };
 
     // Probe first: kernels without Landlock (e.g. gVisor's sentry returns
     // ENOSYS) would otherwise log misleading "Applying"+"Built" events.
@@ -325,10 +339,38 @@ fn prepare_with_path_open_mode(
             .handle_access(access_all)
             .into_diagnostic()?;
 
-        let mut ruleset = ruleset.create().into_diagnostic()?;
-        let mut rules_applied: usize = 0;
+        let ruleset = ruleset.create().into_diagnostic()?;
+        let (mut ruleset, mut rules_applied) = cdi_paths.process_validated(
+            (ruleset, 0_usize),
+            |path| PathFd::new(path).into_diagnostic(),
+            |(ruleset, count), path, fd| {
+                // A covered CDI target still needs validation, but no extra
+                // rule. Match exact policy entries without reopening the path.
+                let access = if read_write.iter().any(|allowed| allowed == path) {
+                    Some(access_all)
+                } else if read_only.iter().any(|allowed| allowed == path) {
+                    Some(access_read)
+                } else {
+                    None
+                };
+                let Some(access) = access else {
+                    return Ok((ruleset, count));
+                };
+                let allowed_access = access_for_path_fd(fd, access, abi)?;
+                debug!(path = %path.display(), "Landlock allow validated CDI target");
+                Ok((
+                    ruleset
+                        .add_rule(PathBeneath::new(fd, allowed_access))
+                        .into_diagnostic()?,
+                    count + 1,
+                ))
+            },
+        )?;
 
         for path in &read_only {
+            if cdi_paths.contains(path) {
+                continue;
+            }
             if let Some(path_fd) = try_open_path(path, compatibility, path_open_mode)? {
                 let allowed_access = access_for_path_fd(&path_fd, access_read, abi)?;
                 debug!(path = %path.display(), "Landlock allow read-only");
@@ -340,6 +382,9 @@ fn prepare_with_path_open_mode(
         }
 
         for path in &read_write {
+            if cdi_paths.contains(path) {
+                continue;
+            }
             if let Some(path_fd) = try_open_path(path, compatibility, path_open_mode)? {
                 let allowed_access = access_for_path_fd(&path_fd, access_all, abi)?;
                 debug!(path = %path.display(), "Landlock allow read-write");
@@ -599,6 +644,7 @@ mod tests {
                 read_only,
                 read_write,
                 include_workdir: false,
+                cdi_requirements: None,
             },
             network: NetworkPolicy::default(),
             landlock: LandlockPolicy {
@@ -606,6 +652,93 @@ mod tests {
             },
             process: ProcessPolicy::default(),
         }
+    }
+
+    #[test]
+    fn cdi_rules_remain_pinned_after_symlink_swap() {
+        let availability = probe_availability();
+        if !matches!(availability, LandlockAvailability::Available { abi } if abi >= 3) {
+            assert!(
+                std::env::var_os("OPENSHELL_TEST_REQUIRE_LANDLOCK").is_none(),
+                "Landlock ABI v3 required for this regression: {availability}"
+            );
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let library = temp.path().join("lib");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&library).unwrap();
+        std::fs::write(library.join("sentinel"), b"allowed").unwrap();
+        std::os::unix::fs::symlink(&library, &alias).unwrap();
+        let mut policy = hard_requirement_policy(vec![alias.clone()], vec![]);
+        policy.landlock.compatibility = LandlockCompatibility::BestEffort;
+        policy.filesystem.cdi_requirements = Some(openshell_core::cdi::CdiDerivedRequirements {
+            read_only_paths: vec![alias.to_string_lossy().into_owned()],
+            ..Default::default()
+        });
+        std::thread::spawn(move || {
+            let prepared = prepare_current_user(&policy, None).unwrap().unwrap();
+            std::fs::remove_file(&alias).unwrap();
+            std::os::unix::fs::symlink("/", &alias).unwrap();
+            // Later exec preparation must validate the swapped target afresh.
+            assert!(prepare_current_user(&policy, None).is_err());
+            enforce(prepared).unwrap();
+            assert_eq!(std::fs::read(library.join("sentinel")).unwrap(), b"allowed");
+            for path in [PathBuf::from("/etc/hosts"), alias.join("etc/hosts")] {
+                assert_eq!(
+                    std::fs::read(path).unwrap_err().kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn cdi_alias_validation_is_fatal_in_best_effort_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let alias = temp.path().join("lib");
+        std::os::unix::fs::symlink("/", &alias).unwrap();
+        let mut policy = hard_requirement_policy(vec![alias.clone()], vec![]);
+        policy.landlock.compatibility = LandlockCompatibility::BestEffort;
+        policy.filesystem.cdi_requirements = Some(openshell_core::cdi::CdiDerivedRequirements {
+            read_only_paths: vec![alias.to_string_lossy().into_owned()],
+            ..Default::default()
+        });
+        assert!(prepare_current_user(&policy, None).is_err());
+    }
+
+    #[test]
+    fn cdi_targets_covered_by_authored_ancestors_are_still_validated() {
+        if !matches!(probe_availability(), LandlockAvailability::Available { .. }) {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let alias = temp.path().join("lib");
+        std::os::unix::fs::symlink("/", &alias).unwrap();
+        let mut policy = hard_requirement_policy(vec![temp.path().to_path_buf()], vec![]);
+        policy.filesystem.cdi_requirements = Some(openshell_core::cdi::CdiDerivedRequirements {
+            read_only_paths: vec![alias.to_string_lossy().into_owned()],
+            ..Default::default()
+        });
+        let Err(error) = prepare_current_user(&policy, None) else {
+            panic!("covered CDI target must be validated");
+        };
+        assert!(error.to_string().contains("broad root"));
+    }
+
+    #[test]
+    fn cdi_missing_path_is_fatal_in_current_user_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing");
+        let mut policy = hard_requirement_policy(vec![path.clone()], vec![]);
+        policy.landlock.compatibility = LandlockCompatibility::BestEffort;
+        policy.filesystem.cdi_requirements = Some(openshell_core::cdi::CdiDerivedRequirements {
+            read_only_paths: vec![path.to_string_lossy().into_owned()],
+            ..Default::default()
+        });
+        assert!(prepare_current_user(&policy, None).is_err());
     }
 
     #[test]

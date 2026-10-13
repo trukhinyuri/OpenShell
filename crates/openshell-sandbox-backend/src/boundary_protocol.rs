@@ -510,6 +510,12 @@ pub struct BoundaryConfig {
     /// Downward API. Other drivers may leave the map empty.
     #[serde(default)]
     pub resource_claim_files: std::collections::BTreeMap<String, PathBuf>,
+    /// Driver-protected CDI selection and workload-local specification projections.
+    ///
+    /// The sandbox runtime resolves this context inside the workload mount
+    /// namespace before applying launch-time filesystem controls.
+    #[serde(default)]
+    pub cdi_context: Option<openshell_core::cdi::CdiContext>,
     /// Exact identity already applied by the runtime to the sandbox process.
     pub workload_identity: openshell_isolation_interface::contract::ResolvedWorkloadIdentity,
     /// Backend-neutral projection of the validated outer network fence.
@@ -540,6 +546,7 @@ impl fmt::Debug for BoundaryConfig {
             .field("listener", &self.listener)
             .field("resource_claims", &self.resource_claims)
             .field("resource_claim_files", &self.resource_claim_files)
+            .field("has_cdi_context", &self.cdi_context.is_some())
             .field("workload_identity", &self.workload_identity)
             .field("outer_fence", &self.outer_fence)
             .field("child_env_keys", &self.child_env.keys().collect::<Vec<_>>())
@@ -1191,6 +1198,8 @@ pub struct SandboxPolicyWire {
     pub landlock: LandlockCompatibilityWire,
     pub run_as_user: Option<String>,
     pub run_as_group: Option<String>,
+    #[serde(default)]
+    pub supplemental_groups: Vec<u32>,
 }
 
 impl From<SandboxPolicy> for SandboxPolicyWire {
@@ -1209,12 +1218,15 @@ impl From<SandboxPolicy> for SandboxPolicyWire {
             read_only,
             read_write,
             include_workdir,
+            // CDI provenance is reconstructed in the workload from trusted context.
+            cdi_requirements: _,
         } = filesystem;
         let NetworkPolicy { mode, proxy } = network;
         let LandlockPolicy { compatibility } = landlock;
         let ProcessPolicy {
             run_as_user,
             run_as_group,
+            supplemental_groups,
         } = process;
         Self {
             version,
@@ -1226,6 +1238,7 @@ impl From<SandboxPolicy> for SandboxPolicyWire {
             landlock: LandlockCompatibilityWire::from(compatibility),
             run_as_user,
             run_as_group,
+            supplemental_groups,
         }
     }
 }
@@ -1241,6 +1254,7 @@ impl From<SandboxPolicyWire> for SandboxPolicy {
                 read_only: policy.read_only,
                 read_write: policy.read_write,
                 include_workdir: policy.include_workdir,
+                cdi_requirements: None,
             },
             network: NetworkPolicy {
                 mode: policy.network.into(),
@@ -1252,6 +1266,7 @@ impl From<SandboxPolicyWire> for SandboxPolicy {
             process: ProcessPolicy {
                 run_as_user: policy.run_as_user,
                 run_as_group: policy.run_as_group,
+                supplemental_groups: policy.supplemental_groups,
             },
         }
     }

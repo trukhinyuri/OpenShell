@@ -1945,6 +1945,7 @@ mod baseline_tests {
                 read_only: vec![PathBuf::from("/tmp")],
                 read_write: vec![],
                 include_workdir: false,
+                cdi_requirements: None,
             },
             network: NetworkPolicy {
                 mode: NetworkMode::Proxy,

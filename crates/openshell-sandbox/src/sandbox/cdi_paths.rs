@@ -1,0 +1,364 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Validate CDI objects using the descriptors that will anchor Landlock rules.
+
+use std::collections::BTreeMap;
+use std::os::fd::AsFd;
+use std::path::{Path, PathBuf};
+
+use miette::{IntoDiagnostic, Result};
+use openshell_core::cdi::CdiDerivedRequirements;
+use rustix::fs::{FileType, fstat};
+
+/// Deduplicated CDI paths and their combined validation requirements.
+/// Stores no descriptors; target handles live only through validation and use.
+#[derive(Default)]
+pub(super) struct CdiPaths {
+    paths: BTreeMap<PathBuf, TargetRequirements>,
+}
+
+#[derive(Default)]
+struct TargetRequirements {
+    device: bool,
+    writable_file: bool,
+    mount_read_only: Option<bool>,
+}
+
+impl CdiPaths {
+    pub(super) fn new(requirements: &CdiDerivedRequirements) -> Self {
+        let mut paths = BTreeMap::<PathBuf, TargetRequirements>::new();
+        for path in &requirements.read_only_paths {
+            paths.entry(path.into()).or_default();
+        }
+        for path in &requirements.device_node_paths {
+            paths.entry(path.into()).or_default().device = true;
+        }
+        for path in &requirements.read_write_mount_paths {
+            paths.entry(path.into()).or_default().writable_file = true;
+        }
+        for mount in &requirements.mounts {
+            paths
+                .entry((&mount.path).into())
+                .or_default()
+                .mount_read_only = Some(mount.read_only);
+        }
+        Self { paths }
+    }
+
+    pub(super) fn contains(&self, path: &Path) -> bool {
+        self.paths.contains_key(path)
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    /// Open, validate and consume one target at a time, including targets
+    /// covered by authored ancestors. `apply` must install any matching rules
+    /// using the supplied descriptor before this function closes it.
+    /// Symlinks remain supported: validation applies to the opened object,
+    /// without a canonicalize/reopen race.
+    pub(super) fn process_validated<F: AsFd, S>(
+        &self,
+        mut state: S,
+        mut open: impl FnMut(&Path) -> Result<F>,
+        mut apply: impl FnMut(S, &Path, &F) -> Result<S>,
+    ) -> Result<S> {
+        if self.is_empty() {
+            return Ok(state);
+        }
+        // Retain only root identities. Each root descriptor closes immediately.
+        let mut broad_roots = Vec::new();
+        for root in ["/", "/dev", "/proc", "/sys", "/run", "/usr"] {
+            match open(Path::new(root)) {
+                Ok(fd) => broad_roots.push(fstat(&fd).into_diagnostic()?),
+                Err(_) if !Path::new(root).exists() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        #[cfg(target_os = "linux")]
+        let mount_table = self
+            .paths
+            .values()
+            .any(|target| target.mount_read_only.is_some())
+            .then(openshell_core::cdi::CdiMountTable::read)
+            .transpose()
+            .into_diagnostic()?;
+        for (path, requirements) in &self.paths {
+            let fd = open(path)?;
+            let stat = fstat(&fd).into_diagnostic()?;
+            if broad_roots
+                .iter()
+                .any(|root| root.st_dev == stat.st_dev && root.st_ino == stat.st_ino)
+            {
+                return Err(miette::miette!(
+                    "CDI path '{}' resolves to a forbidden broad root",
+                    path.display()
+                ));
+            }
+            let kind = FileType::from_raw_mode(stat.st_mode);
+            if requirements.device
+                && !matches!(kind, FileType::CharacterDevice | FileType::BlockDevice)
+            {
+                return Err(miette::miette!(
+                    "CDI device '{}' is not a character or block device",
+                    path.display()
+                ));
+            }
+            if requirements.writable_file && kind != FileType::RegularFile {
+                return Err(miette::miette!(
+                    "CDI writable mount '{}' is not a single regular file",
+                    path.display()
+                ));
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(expected) = requirements.mount_read_only {
+                let actual = mount_table
+                    .as_ref()
+                    .expect("mount table loaded")
+                    .read_only(&path.to_string_lossy(), &fd)
+                    .into_diagnostic()?;
+                if actual != expected {
+                    return Err(miette::miette!(
+                        "CDI mount '{}' changed effective access before enforcement",
+                        path.display()
+                    ));
+                }
+            }
+            state = apply(state, path, &fd)?;
+            // The descriptor closes before the next target is opened. Landlock
+            // retains its object reference after successful rule insertion.
+        }
+        Ok(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::os::unix::fs::symlink;
+
+    fn open(path: &Path) -> Result<File> {
+        File::open(path).into_diagnostic()
+    }
+
+    fn validate(
+        requirements: &CdiDerivedRequirements,
+        open: impl FnMut(&Path) -> Result<File>,
+    ) -> Result<()> {
+        CdiPaths::new(requirements).process_validated((), open, |(), _, _| Ok(()))
+    }
+
+    fn read_only(path: &Path) -> CdiDerivedRequirements {
+        CdiDerivedRequirements {
+            read_only_paths: vec![path.to_string_lossy().into_owned()],
+            ..Default::default()
+        }
+    }
+
+    struct TrackedFd {
+        file: File,
+        live: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl AsFd for TrackedFd {
+        fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+            self.file.as_fd()
+        }
+    }
+
+    impl Drop for TrackedFd {
+        fn drop(&mut self) {
+            self.live.set(self.live.get() - 1);
+        }
+    }
+
+    #[test]
+    fn deduplicates_paths_and_keeps_one_descriptor_live() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut requirements = CdiDerivedRequirements::default();
+        for index in 0..512 {
+            let path = temp.path().join(format!("file-{index}"));
+            std::fs::write(&path, "").unwrap();
+            let path = path.to_string_lossy().into_owned();
+            requirements
+                .read_only_paths
+                .extend([path.clone(), path.clone()]);
+            requirements.read_write_mount_paths.push(path);
+        }
+        let paths = CdiPaths::new(&requirements);
+        assert!(paths.contains(&temp.path().join("file-0")));
+        let live = std::rc::Rc::new(std::cell::Cell::new(0));
+        let processed = paths
+            .process_validated(
+                0,
+                |path| {
+                    // No earlier target (or root) descriptor may survive this open.
+                    assert_eq!(live.get(), 0);
+                    let file = open(path)?;
+                    live.set(live.get() + 1);
+                    Ok(TrackedFd {
+                        file,
+                        live: std::rc::Rc::clone(&live),
+                    })
+                },
+                |count, _, fd| {
+                    assert_eq!(live.get(), 1);
+                    assert_eq!(
+                        FileType::from_raw_mode(fstat(fd).unwrap().st_mode),
+                        FileType::RegularFile
+                    );
+                    Ok(count + 1)
+                },
+            )
+            .unwrap();
+        assert_eq!(processed, 512);
+        assert_eq!(live.get(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rechecks_effective_mount_access_on_the_consumed_descriptor() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        std::fs::write(&target, "").unwrap();
+        let requirements = CdiDerivedRequirements {
+            mounts: vec![openshell_core::cdi::CdiMountRequirement {
+                path: target.to_string_lossy().into_owned(),
+                read_only: true,
+            }],
+            ..Default::default()
+        };
+        let error = validate(&requirements, open).unwrap_err();
+        assert!(error.to_string().contains("changed effective access"));
+    }
+
+    #[test]
+    fn retains_all_constraints_for_duplicate_paths() {
+        let requirements = CdiDerivedRequirements {
+            read_only_paths: vec!["/dev/null".into()],
+            device_node_paths: vec!["/dev/null".into()],
+            read_write_mount_paths: vec!["/dev/null".into()],
+            ..Default::default()
+        };
+        // Valid as a device but invalid as a writable regular-file mount.
+        let error = validate(&requirements, open).unwrap_err();
+        assert!(error.to_string().contains("single regular file"));
+    }
+
+    #[test]
+    fn closes_descriptor_when_consumer_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let live = std::rc::Rc::new(std::cell::Cell::new(0));
+        let paths = CdiPaths::new(&read_only(temp.path()));
+        let result = paths.process_validated(
+            (),
+            |path| {
+                assert_eq!(live.get(), 0);
+                let file = open(path)?;
+                live.set(live.get() + 1);
+                Ok(TrackedFd {
+                    file,
+                    live: std::rc::Rc::clone(&live),
+                })
+            },
+            |(), _, _| Err(miette::miette!("rule insertion failed")),
+        );
+        assert!(result.is_err());
+        assert_eq!(live.get(), 0);
+    }
+
+    #[test]
+    fn rejects_symlink_aliases_to_broad_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let alias = temp.path().join("library-parent");
+        for root in ["/", "/dev", "/proc", "/sys", "/run", "/usr"] {
+            if !Path::new(root).exists() {
+                continue;
+            }
+            symlink(root, &alias).unwrap();
+            assert!(
+                validate(&read_only(&alias), open)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("broad root")
+            );
+            std::fs::remove_file(&alias).unwrap();
+        }
+    }
+
+    #[test]
+    fn allows_library_directory_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let library = temp.path().join("lib");
+        std::fs::create_dir(&library).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&library, &alias).unwrap();
+        assert!(validate(&read_only(&alias), open).is_ok());
+    }
+
+    #[test]
+    fn validates_types_on_opened_objects() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("fake-device");
+        std::fs::write(&file, "").unwrap();
+        let requirements = CdiDerivedRequirements {
+            device_node_paths: vec![file.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        assert!(validate(&requirements, open).is_err());
+        let requirements = CdiDerivedRequirements {
+            read_write_mount_paths: vec![temp.path().to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        assert!(validate(&requirements, open).is_err());
+        let requirements = CdiDerivedRequirements {
+            read_write_mount_paths: vec![file.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        assert!(validate(&requirements, open).is_ok());
+        let requirements = CdiDerivedRequirements {
+            device_node_paths: vec!["/dev/null".into()],
+            ..Default::default()
+        };
+        assert!(validate(&requirements, open).is_ok());
+    }
+
+    #[test]
+    fn pins_target_across_swap_and_revalidates_next_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let library = temp.path().join("lib");
+        std::fs::create_dir(&library).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&library, &alias).unwrap();
+        let requirements = read_only(&alias);
+        let expected = fstat(File::open(&library).unwrap()).unwrap();
+        let pinned = CdiPaths::new(&requirements)
+            .process_validated(
+                None,
+                |path| {
+                    let fd = open(path)?;
+                    if path == alias {
+                        std::fs::remove_file(&alias).unwrap();
+                        symlink("/", &alias).unwrap();
+                    }
+                    Ok(fd)
+                },
+                |_, path, fd| {
+                    assert_eq!(path, alias);
+                    Ok(Some(fstat(fd).unwrap()))
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (pinned.st_dev, pinned.st_ino),
+            (expected.st_dev, expected.st_ino)
+        );
+        // Exec clones preserve provenance and prepare fresh rules, so the new
+        // alias must be rejected rather than using earlier pathname validation.
+        assert!(validate(&requirements, open).is_err());
+    }
+}

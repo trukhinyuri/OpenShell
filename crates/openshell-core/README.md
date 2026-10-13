@@ -64,3 +64,31 @@ Use `openshell_core::proto_struct` when crossing between `serde_json` values and
 `prost_types::{Struct, Value}`. Both conversion directions live in this module;
 JSON-to-protobuf conversion is fallible so callers cannot silently replace an
 unrepresentable number.
+
+## CDI policy provenance
+
+The workload resolves trusted CDI context into filesystem requirements. Library
+mounts expand to their parent directory; the expanded path must pass the same
+broad-root rejection as other CDI destinations.
+
+`FilesystemPolicy::cdi_requirements` is runtime-local provenance, retained by
+policy clones for initial launch and subsequent execs. Protobuf and boundary
+wire conversion do not accept it; the workload derives it from CDI context.
+The sandbox processes deduplicated CDI targets sequentially: open a target,
+validate its type and broad-root object identity, add matching Landlock rules
+using that same descriptor, and close it before opening the next target.
+Targets covered by authored ancestors are validated without adding a rule.
+Only path requirements and root identities are retained; the number of open
+CDI descriptors does not grow with the spec. Symlinks to legitimate library
+directories remain supported. CDI validation and enforcement failures abort launch, including
+when the authored Landlock compatibility is best effort. Other path sources
+retain their existing opening behavior.
+
+Original CDI mount destinations remain separate from expanded library parents.
+The workload classifies their effective read-only flags rather than trusting
+spec option defaults, and checks original directory mounts for writable
+submounts using one mount-table snapshot per pass. A writable destination must
+be a single regular file explicitly listed in authored `read_write` paths.
+The sequential Landlock pass rechecks mount access on its opened descriptors.
+CDI does not add write access to `/proc`; existing thread-name mediation applies.
+Supplemental groups must already be supplied by the container runtime.

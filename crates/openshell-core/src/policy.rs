@@ -30,6 +30,10 @@ pub struct FilesystemPolicy {
 
     /// Automatically include the workdir as read-write.
     pub include_workdir: bool,
+
+    /// Workload-local CDI provenance, retained across launches and execs.
+    /// Derived from trusted CDI context; never accepted from authored policy.
+    pub cdi_requirements: Option<crate::cdi::CdiDerivedRequirements>,
 }
 
 impl Default for FilesystemPolicy {
@@ -38,6 +42,7 @@ impl Default for FilesystemPolicy {
             read_only: Vec::new(),
             read_write: Vec::new(),
             include_workdir: true,
+            cdi_requirements: None,
         }
     }
 }
@@ -83,6 +88,12 @@ pub struct ProcessPolicy {
 
     /// Group name to run the sandboxed process as.
     pub run_as_group: Option<String>,
+
+    /// Linux supplemental groups required from the workload runtime.
+    ///
+    /// Runtime-specific inputs can use different terminology; CDI
+    /// `additionalGids` are converted into this process-level representation.
+    pub supplemental_groups: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -151,6 +162,7 @@ impl From<ProtoFilesystemPolicy> for FilesystemPolicy {
                 .map(|p| PathBuf::from(normalize_path(&p)))
                 .collect(),
             include_workdir: proto.include_workdir,
+            cdi_requirements: None,
         }
     }
 }
@@ -185,6 +197,7 @@ impl From<ProtoProcessPolicy> for ProcessPolicy {
             } else {
                 Some(proto.run_as_group)
             },
+            supplemental_groups: Vec::new(),
         }
     }
 }

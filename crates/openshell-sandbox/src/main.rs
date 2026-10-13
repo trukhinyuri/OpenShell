@@ -308,6 +308,7 @@ fn run_capability_landlock_child(args: &[String]) -> Result<()> {
             read_only: vec![allowed.to_path_buf()],
             read_write: Vec::new(),
             include_workdir: false,
+            cdi_requirements: None,
         },
         network: NetworkPolicy::default(),
         landlock: LandlockPolicy {
