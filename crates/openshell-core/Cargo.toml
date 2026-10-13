@@ -44,7 +44,10 @@ openshell-otel = { path = "../openshell-otel", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
-rustix = { workspace = true }
+rustix = { workspace = true, features = ["fs"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+container-device-interface = { workspace = true }
 
 [features]
 default = ["telemetry"]
