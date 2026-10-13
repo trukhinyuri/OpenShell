@@ -26,6 +26,7 @@ enum CdiPathKind {
     Directory,
     CharacterDevice,
     BlockDevice,
+    Socket,
     Other,
 }
 
@@ -36,6 +37,7 @@ impl fmt::Display for CdiPathKind {
             Self::Directory => f.write_str("directory"),
             Self::CharacterDevice => f.write_str("character device"),
             Self::BlockDevice => f.write_str("block device"),
+            Self::Socket => f.write_str("Unix socket"),
             Self::Other => f.write_str("other"),
         }
     }
@@ -78,11 +80,15 @@ enum CdiAccess {
 struct RequirementAccumulator {
     device_node_paths: BTreeSet<String>,
     mount_paths: BTreeMap<String, CdiAccess>,
+    socket_paths: BTreeSet<String>,
     additional_gids: BTreeSet<u32>,
 }
 
 impl RequirementAccumulator {
     fn add_device_node(&mut self, path: String) -> Result<(), CdiError> {
+        if self.socket_paths.contains(&path) {
+            return Err(CdiError::ConflictingAccess { path });
+        }
         match self.mount_paths.get(&path).copied() {
             Some(CdiAccess::ReadOnly) => Err(CdiError::ConflictingAccess { path }),
             Some(CdiAccess::ReadWrite) | None => {
@@ -93,7 +99,9 @@ impl RequirementAccumulator {
     }
 
     fn add_mount(&mut self, path: String, access: CdiAccess) -> Result<(), CdiError> {
-        if access == CdiAccess::ReadOnly && self.device_node_paths.contains(&path) {
+        if self.socket_paths.contains(&path)
+            || (access == CdiAccess::ReadOnly && self.device_node_paths.contains(&path))
+        {
             return Err(CdiError::ConflictingAccess { path });
         }
         match self.mount_paths.get(&path).copied() {
@@ -104,6 +112,14 @@ impl RequirementAccumulator {
                 Ok(())
             }
         }
+    }
+
+    fn add_socket(&mut self, path: String) -> Result<(), CdiError> {
+        if self.device_node_paths.contains(&path) || self.mount_paths.contains_key(&path) {
+            return Err(CdiError::ConflictingAccess { path });
+        }
+        self.socket_paths.insert(path);
+        Ok(())
     }
 
     fn add_gid(&mut self, gid: u32) -> Result<(), CdiError> {
@@ -133,6 +149,7 @@ impl RequirementAccumulator {
         }
         Ok(CdiDerivedRequirements {
             device_node_paths: self.device_node_paths.into_iter().collect(),
+            socket_paths: self.socket_paths.into_iter().collect(),
             read_only_paths: read_only_paths.into_iter().collect(),
             read_write_mount_paths,
             additional_gids: self.additional_gids.into_iter().collect(),
@@ -310,6 +327,9 @@ fn classify_cdi_mounts(requirements: &mut CdiDerivedRequirements) -> Result<(), 
     for gid in &requirements.additional_gids {
         accumulator.add_gid(*gid)?;
     }
+    for path in &requirements.socket_paths {
+        accumulator.add_socket(path.clone())?;
+    }
     for mount in &requirements.mounts {
         let fd = rustix::fs::open(
             &mount.path,
@@ -317,6 +337,11 @@ fn classify_cdi_mounts(requirements: &mut CdiDerivedRequirements) -> Result<(), 
             rustix::fs::Mode::empty(),
         )
         .map_err(|error| mount_inspection(&mount.path, error))?;
+        let stat = rustix::fs::fstat(&fd).map_err(|error| mount_inspection(&mount.path, error))?;
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Socket {
+            accumulator.add_socket(mount.path.clone())?;
+            continue;
+        }
         let read_only = table.read_only(&mount.path, &fd)?;
         accumulator.add_mount(
             mount.path.clone(),
@@ -362,6 +387,15 @@ where
             Some(CdiPathKind::CharacterDevice | CdiPathKind::BlockDevice)
         ) {
             return Err(CdiError::DeviceNodeNotDevice {
+                path: path.clone(),
+                kind: kind.map_or_else(|| "missing".to_string(), |kind| kind.to_string()),
+            });
+        }
+    }
+    for path in &requirements.socket_paths {
+        let kind = path_kind(path);
+        if kind != Some(CdiPathKind::Socket) {
+            return Err(CdiError::SocketPathNotSocket {
                 path: path.clone(),
                 kind: kind.map_or_else(|| "missing".to_string(), |kind| kind.to_string()),
             });
@@ -572,7 +606,9 @@ fn filesystem_path_kind(path: &str) -> Option<CdiPathKind> {
     if file_type.is_block_device() {
         return Some(CdiPathKind::BlockDevice);
     }
-    if file_type.is_file() {
+    if file_type.is_socket() {
+        Some(CdiPathKind::Socket)
+    } else if file_type.is_file() {
         Some(CdiPathKind::File)
     } else if file_type.is_dir() {
         Some(CdiPathKind::Directory)
@@ -584,6 +620,50 @@ fn filesystem_path_kind(path: &str) -> Option<CdiPathKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_resolution_keeps_socket_destinations_exact_without_file_grants() {
+        let directory = tempfile::tempdir().unwrap();
+        let specs = directory.path().join("specs");
+        std::fs::create_dir(&specs).unwrap();
+        for name in [
+            "persistenced/socket",
+            "fabricmanager/socket",
+            "libdaemon.so.1",
+        ] {
+            let target = directory.path().join(name);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            let _listener = std::os::unix::net::UnixListener::bind(&target).unwrap();
+            for options in ["[]", "[ro, bind]", "[rw, rbind]"] {
+                write_spec(
+                    &specs,
+                    "socket.yaml",
+                    &format!(
+                        "cdiVersion: 0.7.0\nkind: example.com/device\ndevices:\n  - name: test\n    containerEdits:\n      mounts:\n        - hostPath: /host/socket\n          containerPath: {}\n          options: {}\n",
+                        target.display(),
+                        options,
+                    ),
+                );
+                let requirements =
+                    resolve_cdi_context(&context(&specs, &["example.com/device=test"])).unwrap();
+                assert_eq!(requirements.socket_paths, vec![target.to_string_lossy()]);
+                assert!(requirements.read_only_paths.is_empty());
+                assert!(requirements.read_write_mount_paths.is_empty());
+                assert!(requirements.mounts.is_empty());
+                validate_cdi_requirements(&requirements, &HashSet::<String>::new()).unwrap();
+            }
+            let requirements = CdiDerivedRequirements {
+                socket_paths: vec![target.to_string_lossy().into_owned()],
+                ..Default::default()
+            };
+            std::fs::remove_file(&target).unwrap();
+            std::fs::write(&target, "replacement").unwrap();
+            assert!(matches!(
+                validate_cdi_requirements(&requirements, &HashSet::<String>::new()),
+                Err(CdiError::SocketPathNotSocket { .. })
+            ));
+        }
+    }
 
     #[test]
     fn runtime_resolution_classifies_a_mount_without_access_options() {

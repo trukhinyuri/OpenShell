@@ -655,6 +655,52 @@ mod tests {
     }
 
     #[test]
+    fn cdi_socket_communication_does_not_grant_parent_file_access() {
+        use std::io::{Read, Write};
+
+        let availability = probe_availability();
+        if !matches!(availability, LandlockAvailability::Available { abi } if abi >= 3) {
+            assert!(
+                std::env::var_os("OPENSHELL_TEST_REQUIRE_LANDLOCK").is_none(),
+                "Landlock ABI v3 required: {availability}"
+            );
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("socket");
+        let sibling = temp.path().join("secret");
+        std::fs::write(&sibling, b"secret").unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&target).unwrap();
+        let allowed = temp.path().join("allowed");
+        std::fs::write(&allowed, b"allowed").unwrap();
+        let mut policy = hard_requirement_policy(vec![allowed], vec![]);
+        policy.filesystem.cdi_requirements = Some(openshell_core::cdi::CdiDerivedRequirements {
+            socket_paths: vec![target.to_string_lossy().into_owned()],
+            ..Default::default()
+        });
+        std::thread::spawn(move || {
+            let prepared = prepare_current_user(&policy, None).unwrap().unwrap();
+            enforce(prepared).unwrap();
+            let mut stream = std::os::unix::net::UnixStream::connect(&target).unwrap();
+            stream.write_all(b"ping").unwrap();
+            assert_eq!(
+                std::fs::read(&sibling).unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+            assert_eq!(
+                std::fs::write(&sibling, b"changed").unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        })
+        .join()
+        .unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut message = [0; 4];
+        stream.read_exact(&mut message).unwrap();
+        assert_eq!(&message, b"ping");
+    }
+
+    #[test]
     fn cdi_rules_remain_pinned_after_symlink_swap() {
         let availability = probe_availability();
         if !matches!(availability, LandlockAvailability::Available { abi } if abi >= 3) {

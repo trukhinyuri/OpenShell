@@ -151,10 +151,12 @@ updated Docker daemon capability.
 For CDI-enabled Docker sandboxes, OpenShell validates the injected filesystem
 targets before each launch and exec. Library directories may use symlinks, but
 must not resolve to broad roots such as `/`, `/usr`, or `/dev`. Device nodes must
-resolve to devices, and writable mounts must resolve to single files explicitly
+resolve to devices, and ordinary writable mounts must resolve to single files explicitly
 allowed by exact entries in the policy. OpenShell determines mount access from
 effective runtime flags, including writable submounts beneath original directory
-mounts. CDI does not automatically grant write access to `/proc`. The container
+mounts. Unix socket mounts retain their exact socket destinations and must resolve
+to sockets at each launch or exec. They do not grant access to parent directories
+or require writable-file policy entries. CDI does not automatically grant write access to `/proc`. The container
 runtime must supply any supplemental groups required by the CDI spec; missing
 groups prevent workload launch. CDI spec projections are checked with resource
 admission enabled. Invalid CDI targets or unavailable filesystem enforcement

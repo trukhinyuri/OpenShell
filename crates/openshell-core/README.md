@@ -87,8 +87,15 @@ retain their existing opening behavior.
 Original CDI mount destinations remain separate from expanded library parents.
 The workload classifies their effective read-only flags rather than trusting
 spec option defaults, and checks original directory mounts for writable
-submounts using one mount-table snapshot per pass. A writable destination must
+submounts using one mount-table snapshot per pass. An ordinary writable mount destination must
 be a single regular file explicitly listed in authored `read_write` paths.
 The sequential Landlock pass rechecks mount access on its opened descriptors.
 CDI does not add write access to `/proc`; existing thread-name mediation applies.
 Supplemental groups must already be supplied by the container runtime.
+
+CDI Unix socket mounts are recorded as exact socket destinations, separately from
+ordinary file mounts. Their opened objects must remain Unix sockets at each
+launch or exec. They do not derive filesystem grants, expand to parent
+directories, or require the writable-file allowlist, regardless of mount flags.
+Communication follows the existing Unix IPC and inode permission checks; this
+validation does not pin the endpoint for later pathname-based connections.

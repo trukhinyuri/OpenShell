@@ -21,6 +21,7 @@ pub(super) struct CdiPaths {
 #[derive(Default)]
 struct TargetRequirements {
     device: bool,
+    socket: bool,
     writable_file: bool,
     mount_read_only: Option<bool>,
 }
@@ -30,6 +31,9 @@ impl CdiPaths {
         let mut paths = BTreeMap::<PathBuf, TargetRequirements>::new();
         for path in &requirements.read_only_paths {
             paths.entry(path.into()).or_default();
+        }
+        for path in &requirements.socket_paths {
+            paths.entry(path.into()).or_default().socket = true;
         }
         for path in &requirements.device_node_paths {
             paths.entry(path.into()).or_default().device = true;
@@ -57,6 +61,7 @@ impl CdiPaths {
     /// Open, validate and consume one target at a time, including targets
     /// covered by authored ancestors. `apply` must install any matching rules
     /// using the supplied descriptor before this function closes it.
+    /// Sockets are validated without inserting ordinary filesystem rules.
     /// Symlinks remain supported: validation applies to the opened object,
     /// without a canonicalize/reopen race.
     pub(super) fn process_validated<F: AsFd, S>(
@@ -98,6 +103,12 @@ impl CdiPaths {
                 ));
             }
             let kind = FileType::from_raw_mode(stat.st_mode);
+            if requirements.socket && kind != FileType::Socket {
+                return Err(miette::miette!(
+                    "CDI socket '{}' is not a Unix socket",
+                    path.display()
+                ));
+            }
             if requirements.device
                 && !matches!(kind, FileType::CharacterDevice | FileType::BlockDevice)
             {
@@ -126,7 +137,9 @@ impl CdiPaths {
                     ));
                 }
             }
-            state = apply(state, path, &fd)?;
+            if !requirements.socket {
+                state = apply(state, path, &fd)?;
+            }
             // The descriptor closes before the next target is opened. Landlock
             // retains its object reference after successful rule insertion.
         }
@@ -173,6 +186,43 @@ mod tests {
         fn drop(&mut self) {
             self.live.set(self.live.get() - 1);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socket_targets_are_exact_and_revalidated_without_filesystem_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&target).unwrap();
+        let requirements = CdiDerivedRequirements {
+            socket_paths: vec![target.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        let paths = CdiPaths::new(&requirements);
+        assert!(paths.contains(&target));
+        assert!(!paths.contains(temp.path()));
+        let open_socket = |path: &Path| {
+            rustix::fs::open(
+                path,
+                rustix::fs::OFlags::PATH | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .into_diagnostic()
+        };
+        paths
+            .process_validated((), open_socket, |(), _, _| {
+                panic!("socket must not add a filesystem rule")
+            })
+            .unwrap();
+        std::fs::remove_file(&target).unwrap();
+        std::fs::write(&target, "replacement").unwrap();
+        assert!(
+            paths
+                .process_validated((), open_socket, |(), _, _| Ok(()))
+                .unwrap_err()
+                .to_string()
+                .contains("not a Unix socket")
+        );
     }
 
     #[test]

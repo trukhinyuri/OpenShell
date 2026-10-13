@@ -115,7 +115,12 @@ read-write parent already covers it. The container runtime supplies CDI `additio
 OpenShell verifies that the workload already has those groups and fails startup
 if any required group is missing.
 
-Writable CDI mount destinations are fail-closed. OpenShell accepts a writable
+Unix socket mounts are validated as sockets at their exact destinations at each
+launch or exec. They do not add filesystem grants or parent directory access and
+do not require `read_write` entries, regardless of mount flags. Communication
+uses the existing Unix IPC and socket permission checks.
+
+Ordinary writable CDI mount destinations are fail-closed. OpenShell accepts a writable
 CDI mount only when it targets a single file and that exact path is already
 listed in `filesystem_policy.read_write`. Writable CDI directory mounts and CDI
 paths such as `/`, `/dev`, `/proc`, `/sys`, `/run`, or `/usr` are rejected

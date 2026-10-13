@@ -55,12 +55,14 @@ impl CdiSpecDirectory {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CdiDerivedRequirements {
     pub device_node_paths: Vec<String>,
+    /// Exact Unix socket destinations. Never expanded into filesystem grants.
+    pub socket_paths: Vec<String>,
     /// Derived read-only policy paths. Shared-library mounts contribute their
     /// parent directory; other read-only mounts contribute their exact path.
     pub read_only_paths: Vec<String>,
     pub read_write_mount_paths: Vec<String>,
     pub additional_gids: Vec<u32>,
-    /// Original mount destinations, retained separately from library parents.
+    /// Original ordinary mount destinations, separate from sockets and library parents.
     /// Access is confirmed in the workload namespace before enrichment.
     pub mounts: Vec<CdiMountRequirement>,
 }
@@ -122,6 +124,8 @@ pub enum CdiError {
     WritableMountNotFile { path: String, kind: String },
     #[error("CDI device node '{path}' must target a character or block device, found {kind}")]
     DeviceNodeNotDevice { path: String, kind: String },
+    #[error("CDI socket '{path}' must target a Unix socket, found {kind}")]
+    SocketPathNotSocket { path: String, kind: String },
     #[error("CDI read-only path '{path}' does not exist in the workload namespace")]
     ReadOnlyPathMissing { path: String },
     #[error("CDI additionalGids must not contain root GID 0")]
